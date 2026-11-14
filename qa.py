@@ -35,7 +35,30 @@ NUM_ONLY_RE = re.compile(r"^[\d\s.,:/x×+\-–()]+$")
 
 NAMES = dict(door="door", window="window", toilet="toilet", sink="sink", shower="shower", bathtub="bathtub",
              sauna_stove="sauna stove", kitchen="kitchen", bedroom="bedroom", bathroom="bathroom", wc="WC room",
-             balcony="balcony", sauna="sauna")
+             balcony="balcony", sauna="sauna", living_room="living room", dining_room="dining room", hall="hall",
+             corridor="corridor", office="office", storage="storage room", laundry="laundry room",
+             utility="utility room", closet="closet", entry="entry", garage="garage", other="room")
+
+ROOM_LABEL_PATTERNS = [
+    ("wc", r"\b(wc|w c|toilet|toilette|lavatory|restroom|powder room)\b"),
+    ("kitchen", r"\b(kitchen|kitchenette|cuisine|cocina|cucina|kuche|küche|køkken|kjøkken|keittiö|keittio|kh|kch|kochen)\b"),
+    ("bedroom", r"\b(bed(room)?|bedrm|br|mh|sleeping room|schlafzimmer|kinderzimmer|schlafen|schlaf|makuuhuone|sovrum|soveværelse|chambre|dormitorio|camera|sz)\b"),
+    ("bathroom", r"\b(bath(room)?|washroom|shower room|wet room|badezimmer|dusche|kylpyhuone|pesuhuone|badrum|baño|bagno|salle de bain|salle d eau|ph|bad|ba)\b"),
+    ("living_room", r"\b(living(room)?|sitting room|lounge|family room|salon|salón|soggiorno|liv|lr|oh|ho|wz|wohnen|wohnzimmer|séjour|sejour|woonkamer|vardagsrum|olohuone|stue)\b"),
+    ("dining_room", r"\b(dining(room)?|comedor|dr|esszimmer|salle à manger|ruokailuhuone|spisestue|matrum)\b"),
+    ("balcony", r"\b(balcony|balcon|balkon|loggia|terrace|terrasse|terras|parveke|balkong|veranda|porch)\b"),
+    ("sauna", r"\bsauna\b"),
+    ("corridor", r"\b(corridor|hallway|passage|flur|gang|couloir|käytävä|kaytava|treppenhaus|porras|portaikko)\b"),
+    ("hall", r"\b(hall|foyer|lobby|diele|vestibule|aula)\b"),
+    ("entry", r"\b(entry|entrance|windfang|entrée|entree|entré|przedpokój|eteinen|et)\b"),
+    ("office", r"\b(office|study|büro|buro|bureau|arbeitszimmer|library|bibliothek)\b"),
+    ("laundry", r"\b(laundry|laund(e)?ry room|wash room|waschen|utility laundry|hwr)\b"),
+    ("utility", r"\b(utility|mechanical|plant room|technical room|boiler room|technik|technicalroom)\b"),
+    ("garage", r"\bgarage\b"),
+    ("closet", r"\b(closet|walk[ -]?in|wardrobe|dressing room|garderobe|ankleide|vestiaire|komero|vaatehuone|pukuhuone|vh)\b"),
+    ("storage", r"\b(storage|store room|storeroom|abstellraum|pantry|vorrat|cellar|basement|attic|varasto)\b"),
+    ("other", r"\b(room|zimmer|habitación|habitacion|pièce|piece|space|raum|huone)\b"),
+]
 
 
 # ----------------------------------------------------------------------------- text helpers
@@ -137,7 +160,58 @@ class FloorPlan:
         if self._scene is None:
             import model3d
             self._scene = model3d.build(self.rgb, self.analysis())
+            self._label_scene_rooms(self._scene)
         return self._scene
+
+    def _label_scene_rooms(self, scene):
+        """Attach readable room text to the nearest containing 3D room region."""
+        room_elements = [e for e in scene["elements"] if e["kind"] == "room"]
+        if not room_elements:
+            return
+        scale = self.analysis()["scale"] / scene["px_per_m"]
+        non_room_ids = set()
+        for line in self.room_labels():
+            if not has_word(line.text, NON_ROOM_WORDS):
+                continue
+            point = (line.center[0] * scale, line.center[1] * scale)
+            for room in room_elements:
+                if room["id"].startswith("room-other-") and cv2.pointPolygonTest(
+                        np.float32(room["poly"]), point, False) >= 0:
+                    non_room_ids.add(room["id"])
+        if non_room_ids:
+            scene["elements"] = [e for e in scene["elements"] if e["id"] not in non_room_ids]
+            room_elements = [e for e in room_elements if e["id"] not in non_room_ids]
+        candidates = []
+        for line in self.room_labels():
+            label = AREA_RE.sub("", line.text).strip(" \t-–")
+            if sum(ch.isalpha() for ch in label) < 2:
+                continue
+            kind = next((k for k, pat in ROOM_LABEL_PATTERNS if re.search(pat, norm(label))), None)
+            if kind is None:
+                continue
+            cx, cy = line.center
+            point = (cx * scale, cy * scale)
+            nearby = []
+            for room in room_elements:
+                edge_dist = cv2.pointPolygonTest(np.float32(room["poly"]), point, True)
+                if edge_dist >= -0.75:  # tolerate OCR labels sitting just outside a wall boundary
+                    lx, ly = room.get("label_at", room["poly"][0])
+                    dist = float(np.hypot(point[0] - lx, point[1] - ly))
+                    nearby.append((max(0.0, -edge_dist), kind == "other", dist, room))
+            if nearby:
+                _, generic, dist, room = min(nearby, key=lambda item: (item[0], item[1], item[2]))
+                candidates.append((generic, dist, room, label, kind))
+        # Greedy one-to-one assignment prevents a single OCR line from naming
+        # several rooms when their wall regions touch or share a component.
+        assigned_rooms, assigned_labels = set(), set()
+        for _, _, room, label, kind in sorted(candidates, key=lambda item: (item[0], item[1])):
+            rid, key = id(room), norm(label)
+            if rid in assigned_rooms or key in assigned_labels:
+                continue
+            room["name"] = label
+            room["room"] = kind
+            assigned_rooms.add(rid)
+            assigned_labels.add(key)
 
     def room_at(self, x, y):
         """id of the 3D room (IfcSpace) whose floor contains image point (x, y), if any."""
@@ -209,19 +283,25 @@ class FloorPlan:
         return c == "kitchen"
 
     def _rooms(self, cls):
-        a = self.analysis()
-        ds = list(enumerate(a["rooms"].get(cls, [])))
-        ev = [self._ev_room(cls, i, d) for i, d in ds]
+        scene = self.scene()
+        s = self.analysis()["scale"] / scene["px_per_m"]
+        ds = [e for e in scene["elements"] if e["kind"] == "room" and e.get("room") == cls]
+        ev = []
+        for i, room in enumerate(ds):
+            x, y = room.get("label_at", room["poly"][0])
+            x, y = x / s, y / s
+            r = 0.02 * max(self.rgb.shape[:2])
+            ev.append(dict(box=(x - r, y - r, x + r, y + r), label=room.get("name", NAMES[cls]), id=room["id"]))
         n = len(ds)
         expl = f"The plan reader found {n} {NAMES[cls]}{'s' if n != 1 else ''}"
         if cls == "sauna":  # a sauna is a sauna room or, when the room isn't marked, a sauna stove
-            st = list(enumerate(a["objects"].get("sauna_stove", [])))
+            st = list(enumerate(self.analysis()["objects"].get("sauna_stove", [])))
             if len(st) > n:
                 n = len(st)
                 ev = [self._ev_obj("sauna_stove", i, d) for i, d in st]
                 expl = f"Found {n} sauna stove{'s' if n != 1 else ''} (each marks a sauna)"
         return dict(answer=n, unit="count", type="count", evidence=ev,
-                    explanation=expl + ", recognised from the room labels and contents.")
+                    explanation=expl + ", using enclosed room regions and nearby drawing labels.")
 
     def _floors(self):
         import model3d  # noqa: F401  (floors are separate building outlines in the wall map)
@@ -305,11 +385,10 @@ class FloorPlan:
                     evidence=[dict(self._ev_text(l), label=f"{v:g} m²") for _, v, l in used])
 
     def _apartments(self):
-        a = self.analysis()
-        kit = a["rooms"].get("kitchen", [])
+        kit = [e for e in self.scene()["elements"] if e["kind"] == "room" and e.get("room") == "kitchen"]
         txt = [l for l in self.room_labels() if has_word(l.text, KITCHEN_WORDS)]
         n = max(len(kit), len(txt), 1)
-        ev = [self._ev_room("kitchen", i, d) for i, d in enumerate(kit)] if len(kit) >= len(txt) \
+        ev = [dict(box=None, label=e.get("name", "Kitchen"), id=e["id"]) for e in kit] if len(kit) >= len(txt) \
             else [self._ev_text(l) for l in txt]
         return dict(answer=n, unit="count", type="count", evidence=ev,
                     explanation=f"Estimated from the number of kitchens ({n}); each apartment has one. "
@@ -355,8 +434,19 @@ ROOM_PATTERNS = [  # order matters: "bathrooms ... not counting separate WC room
     ("wc", r"\bwc rooms?\b|\btoilet rooms?\b|\bseparate wcs?\b"),
     ("bedroom", r"\bbedrooms?\b"),
     ("kitchen", r"\bkitchens?\b"),
+    ("living_room", r"\bliving rooms?\b|\blounges?\b|\bfamily rooms?\b"),
+    ("dining_room", r"\bdining rooms?\b|\bdining areas?\b"),
     ("balcony", r"\bbalcon(y|ies)\b"),
     ("sauna", r"\bsaunas?\b"),
+    ("corridor", r"\bcorridors?\b|\bhallways?\b"),
+    ("hall", r"\bhalls?\b|\bfoyers?\b|\blobbies\b"),
+    ("entry", r"\bentries\b|\bentry rooms?\b|\bentrances?\b"),
+    ("office", r"\boffices?\b|\bstudies\b|\blibraries\b"),
+    ("laundry", r"\blaundries\b|\blaundry rooms?\b"),
+    ("utility", r"\butility rooms?\b|\bmechanical rooms?\b|\bboiler rooms?\b"),
+    ("storage", r"\bstorage rooms?\b|\bstorerooms?\b|\bpantries\b"),
+    ("closet", r"\bclosets?\b|\bwardrobes?\b|\bdressing rooms?\b"),
+    ("garage", r"\bgarages?\b"),
 ]
 
 

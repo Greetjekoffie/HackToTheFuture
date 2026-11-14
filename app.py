@@ -2,6 +2,7 @@
 highlighted on the plan and in a 3D model built from it (downloadable as IFC).
 
     python3 app.py            # then open http://localhost:8000
+    .venv-yolo/bin/python app.py  # when using the locally trained YOLO detector
 
 All analysis runs on this machine (OCR, the trained plan reader, question rules, IFC export). Standard
 library HTTP server only. The page loads the three.js viewer library from a CDN.
@@ -13,6 +14,7 @@ library HTTP server only. The page loads the three.js viewer library from a CDN.
 """
 import argparse
 import base64
+import errno
 import io
 import json
 import threading
@@ -149,7 +151,13 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    try:
+        srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    except OSError as ex:
+        if ex.errno == errno.EADDRINUSE:
+            raise SystemExit(f"Port {a.port} is already in use. The app may already be running at "
+                             f"http://localhost:{a.port}; otherwise start another copy with --port {a.port + 1}.")
+        raise
     print(f"Floor plan Q&A running on http://localhost:{a.port}")
     srv.serve_forever()
 

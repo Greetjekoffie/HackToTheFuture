@@ -35,7 +35,7 @@ RAW = ROOT / "data" / "cubicasa5k"
 PREP = ROOT / "data" / "cubicasa_prep"
 OUT = ROOT / "counter_out"
 OBJECTS = ["door", "window", "toilet", "sink", "shower", "bathtub", "sauna_stove"]
-ROOMS = ["kitchen", "bedroom", "bathroom", "wc", "balcony", "sauna"]
+ROOMS = ["kitchen", "bedroom", "bathroom", "wc", "balcony", "sauna", "other"]
 CLASSES = OBJECTS + ROOMS  # heat-map channels; one extra channel (last) = wall mask
 N_OUT = len(CLASSES) + 1
 LONG = 1024  # every plan is resized so its longest side is LONG px (train and inference)
@@ -150,7 +150,10 @@ def room_class(cls_attr, label):
         return "balcony"
     if c[0] == "Sauna":
         return "sauna"
-    return None
+    # Keep all remaining annotated Space polygons as generic rooms. OCR labels
+    # can specialize these at inference; dropping them made whole plans vanish
+    # whenever CubiCasa used an unmapped type such as LivingRoom or Undefined.
+    return "other"
 
 
 def parse_svg(path):
@@ -337,6 +340,23 @@ def build_model(pretrained=True):
     return m
 
 
+def load_checkpoint_weights(model, checkpoint):
+    """Load a prior heat-map checkpoint while preserving channels if classes grew."""
+    source = checkpoint["model"]
+    target = model.state_dict()
+    old_classes = checkpoint.get("classes") or [c for c in CLASSES if c != "other"]
+    for name, value in source.items():
+        if name in ("head.weight", "head.bias") and value.shape != target[name].shape:
+            for cls in CLASSES:
+                if cls in old_classes:
+                    target[name][CLASSES.index(cls)].copy_(value[old_classes.index(cls)])
+            # The wall channel is stored immediately after the old heat channels.
+            target[name][len(CLASSES)].copy_(value[len(old_classes)])
+        elif name in target and target[name].shape == value.shape:
+            target[name] = value
+    model.load_state_dict(target)
+
+
 def device():
     return torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
@@ -434,12 +454,40 @@ def _suppress_detections(dets, radius):
     return kept
 
 
-_MODEL, _MTIME = None, None
+def _instance_size(heat, x, y, fallback, calibration=None):
+    """Estimate one symbol's annotated size from its predicted Gaussian heat spot.
+
+    Training encodes object size as heat-map sigma (sigma = 0.18 * size).
+    The half-maximum diameter therefore gives a per-instance size estimate;
+    clamp it around the class median because probabilities are imperfect.
+    """
+    h, w = heat.shape
+    radius = int(np.clip(round(fallback * 0.5), 8, 36))
+    x0, x1 = max(0, x - radius), min(w, x + radius + 1)
+    y0, y1 = max(0, y - radius), min(h, y + radius + 1)
+    patch = heat[y0:y1, x0:x1]
+    peak = float(heat[y, x])
+    if peak <= 0:
+        return float(fallback)
+    mask = (patch >= peak * 0.5).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    lx, ly = x - x0, y - y0
+    label = int(labels[ly, lx])
+    if label <= 0 or label >= n:
+        return float(fallback)
+    diameter = max(int(stats[label, cv2.CC_STAT_WIDTH]), int(stats[label, cv2.CC_STAT_HEIGHT]))
+    estimate = diameter / (2.355 * 0.18)
+    if calibration:
+        estimate = float(calibration["slope"]) * estimate + float(calibration["intercept"])
+    return float(np.clip(estimate, max(8.0, 0.40 * fallback), max(12.0, 2.5 * fallback)))
+
+
+_MODEL, _MTIME, _SIZE_CAL = None, None, {}
 
 
 def load_trained():
     """Load counter_out/counter.pt; reloads automatically when training writes a newer checkpoint."""
-    global _MODEL, _MTIME
+    global _MODEL, _MTIME, _SIZE_CAL
     ck = OUT / "counter.pt"
     if not ck.exists():
         raise RuntimeError("The plan reader is not trained yet (run: python3 counter.py prepare && "
@@ -449,8 +497,16 @@ def load_trained():
         st = torch.load(ck, map_location="cpu", weights_only=False)  # our own checkpoint
         dev = device()
         m = build_model(pretrained=False)
-        m.load_state_dict(st["model"])
-        _MODEL, _MTIME = (m.to(dev).eval(), {c: float(v) for c, v in st["thr"].items()}, st.get("size", {}), dev), mt
+        load_checkpoint_weights(m, st)
+        thresholds = {c: float(st.get("thr", {}).get(c, 0.1)) for c in CLASSES}
+        # Older checkpoints have no learned `other` heat-map head. Its newly
+        # initialized weights produce a dense cloud of false room centres at
+        # the usual 0.1 threshold, so leave that class to geometric fallback
+        # regions until it has actually been trained.
+        if "other" not in (st.get("classes") or []):
+            thresholds["other"] = 1.1
+        _MODEL, _MTIME = (m.to(dev).eval(), thresholds, st.get("size", {}), dev), mt
+        _SIZE_CAL = st.get("size_calibration", {})
     return _MODEL
 
 
@@ -468,10 +524,16 @@ def analyse(rgb):
         v, xs, ys = pk[c]
         keep = v >= thr[c]
         dets = []
-        half = size.get(c, 20) / 2
+        half_default = size.get(c, 20) / 2
+        heat = p[CLASSES.index(c)].detach().cpu().numpy() if c in OBJECTS else None
         for x, y, sc in zip(xs[keep].cpu().tolist(), ys[keep].cpu().tolist(), v[keep].cpu().tolist()):
             d = dict(center=(x / s, y / s), score=float(sc))
             if c in OBJECTS:
+                # The target heat-map width is derived from each SVG symbol's
+                # own bounds, so estimate each detection separately.
+                obj_size = _instance_size(heat, x, y, size.get(c, 20), _SIZE_CAL.get(c))
+                half = obj_size / 2
+                d["size"] = obj_size / s  # input-image pixels, matching center/box
                 d["box"] = ((x - half) / s, (y - half) / s, (x + half) / s, (y + half) / s)
             dets.append(d)
         if c in OBJECTS:
@@ -493,7 +555,16 @@ def analyse(rgb):
             clean.append((cls, d))
     objects["door"] = [d for cls, d in clean if cls == "door"]
     objects["window"] = [d for cls, d in clean if cls == "window"]
-    return dict(objects=objects, rooms=rooms, wall=p[-1].cpu().numpy(), scale=s)
+    # Prefer a fine-tuned YOLO symbol detector when present. The heat-map model
+    # remains responsible for room labels and walls, and is the fallback until
+    # the YOLO weights have been trained.
+    import yolo_objects
+    yolo = yolo_objects.detect(rgb)
+    object_detector = yolo_objects.detector_name() if yolo is not None else "heat-map detector"
+    if yolo is not None:
+        objects = yolo
+    return dict(objects=objects, rooms=rooms, wall=p[-1].cpu().numpy(), scale=s,
+                object_detector=object_detector)
 
 
 def detect(rgb):
@@ -573,7 +644,7 @@ def train(args):
     model = build_model().to(dev)
     if args.resume and (OUT / "counter.pt").exists():
         prior = torch.load(OUT / "counter.pt", map_location="cpu", weights_only=False)
-        model.load_state_dict(prior["model"])
+        load_checkpoint_weights(model, prior)
         print(f"Fine-tuning existing checkpoint from epoch {prior.get('epoch', '?')}", flush=True)
     print(f"Device {dev} | train {len(tr)} | val {len(va)} | params {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
     steps_per_epoch = args.crops // args.bs

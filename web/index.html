@@ -40,6 +40,15 @@
   #legend { position: absolute; left: 12px; bottom: 12px; display: none; flex-wrap: wrap; gap: 6px 12px; font-size: 12px;
             background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: 8px;
             padding: 6px 10px; max-width: calc(100% - 24px); }
+  #explain3d { position: absolute; z-index: 2; top: 12px; left: 12px; display: none; width: min(300px, calc(100% - 24px));
+               max-height: min(52vh, 420px); overflow: auto; padding: 10px 12px; border: 1px solid var(--line);
+               border-radius: 10px; color: var(--ink); background: color-mix(in srgb, var(--panel) 94%, transparent);
+               box-shadow: 0 2px 12px rgba(0,0,0,.12); font-size: 12px; }
+  #explain3d b { display: block; margin-bottom: 4px; font-size: 12.5px; }
+  #explain3d p { margin: 0 0 8px; color: var(--muted); line-height: 1.4; }
+  #explain3d .det { display: block; width: 100%; padding: 5px 7px; margin: 2px 0; text-align: left; color: var(--ink);
+                   background: transparent; border: 1px solid transparent; font-size: 12px; font-weight: 500; }
+  #explain3d .det:hover { background: var(--accent-soft); border-color: var(--line); }
   #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
   #hint3d { position: absolute; right: 12px; bottom: 12px; display: none; font-size: 12px; color: var(--muted); }
   #planbar { display: none; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px;
@@ -110,6 +119,7 @@
       <div id="view"><img id="img" alt="Uploaded floor plan"><canvas id="ov"></canvas></div>
       <div id="three"></div>
       <div id="threemsg"></div>
+      <div id="explain3d"></div>
       <div id="legend"></div>
       <div id="hint3d">Drag to orbit · scroll to zoom · right-drag to pan</div>
     </div>
@@ -269,7 +279,10 @@ let scene = null, renderer, camera, controls, world, byId = new Map(), tagGroup,
 const COLORS = {
   wall: 0xd9d6cf, door: 0xa9764a, window: 0x8ec5ff, slab: 0xbfbab0,
   toilet: 0xffffff, sink: 0xf4f6f8, shower: 0xe9eef2, bathtub: 0xffffff, sauna_stove: 0x4a4d52,
-  room: { kitchen: 0xf6d38a, bedroom: 0xb9d7f2, bathroom: 0x9fe0d5, wc: 0xc7b8f0, balcony: 0xc9e6a6, sauna: 0xe8b48a },
+  room: { kitchen: 0xf6d38a, bedroom: 0xb9d7f2, bathroom: 0x9fe0d5, wc: 0xc7b8f0, balcony: 0xc9e6a6,
+          sauna: 0xe8b48a, living_room: 0xf1c8a5, dining_room: 0xf4d5a1, hall: 0xd7c3a8, corridor: 0xc9c6db,
+          entry: 0xc9c6db, office: 0xb8d6c1, storage: 0xd4c9bb, laundry: 0xaedbd7, utility: 0xbfc7cd,
+          closet: 0xd5c7e9, garage: 0xb9b9b9, other: 0xd7c3a8 },
 };
 const HL = 0xff5a1f;
 
@@ -279,6 +292,7 @@ async function setView(v) {
   $("#view").style.visibility = v === "2d" ? "visible" : "hidden";
   $("#three").style.display = v === "3d" && scene ? "block" : "none";
   $("#legend").style.display = v === "3d" && scene ? "flex" : "none";
+  $("#explain3d").style.display = v === "3d" && scene ? "block" : "none";
   $("#hint3d").style.display = v === "3d" && scene ? "block" : "none";
   const msg = $("#threemsg");
   msg.style.display = "none";
@@ -371,7 +385,7 @@ function build3d(sc) {
     let obj;
     if (e.kind === "slab") obj = polyMesh(e.poly, 0, mat(COLORS.slab));
     else if (e.kind === "room") {
-      obj = polyMesh(e.poly, 0.015, mat(COLORS.room[e.room], { transparent: true, opacity: 0.85 }));
+      obj = polyMesh(e.poly, 0.015, mat(COLORS.room[e.room] ?? COLORS.room.other, { transparent: true, opacity: 0.85 }));
       const lbl = textSprite(e.name + (e.area ? ` · ${e.area.toFixed(1)} m²` : ""), "rgba(255,255,255,.9)", "#333", 0.35);
       lbl.position.set(e.label_at[0], 0.4, e.label_at[1]); obj.userData.label = lbl; world.add(lbl);
       legend.add(`room:${e.room}`);
@@ -382,12 +396,24 @@ function build3d(sc) {
     obj.userData.el = e;
     world.add(obj); byId.set(e.id, obj);
   }
+  const detected = sc.elements.filter(e => e.score !== undefined && ["door", "window", "toilet", "sink", "shower", "bathtub", "sauna_stove"].includes(e.kind));
+  const detectorName = sc.object_detector || "object detector";
+  $("#explain3d").innerHTML = `<b>Object detection · ${esc(detectorName)}</b>
+    <p>${detectorName.includes("YOLO")
+      ? `${esc(detectorName)} detects symbol boxes in the drawing. Confidence is the model’s certainty, not a guarantee. Click a row to locate the detection. Room outlines come from enclosed walls and nearby plan text supplies their names; the 3D fixture shapes are schematic proxies.`
+      : "YOLO weights are not trained yet, so this view is using the current heat-map detector. Click a row to locate it. Room outlines come from enclosed walls and nearby plan text supplies their names; the 3D fixture shapes are schematic proxies."}</p>
+    ${detected.length ? detected.map((e, i) => `<button class="det" type="button" data-id="${esc(e.id)}">${i + 1}. ${esc(e.name)} · ${Math.round((e.score || 0) * 100)}% confidence</button>`).join("") : '<span class="empty">No object detections in this plan.</span>'}`;
+  $("#explain3d").querySelectorAll("button[data-id]").forEach(b => b.addEventListener("click", () =>
+    highlight3d({ evidence: [{ id: b.dataset.id }] })));
   // legend
   const names = { toilet: "Toilet", sink: "Sink", shower: "Shower", bathtub: "Bathtub", sauna_stove: "Sauna stove" };
-  const rn = { kitchen: "Kitchen", bedroom: "Bedroom", bathroom: "Bathroom", wc: "WC", balcony: "Balcony", sauna: "Sauna" };
+  const rn = { kitchen: "Kitchen", bedroom: "Bedroom", bathroom: "Bathroom", wc: "WC", balcony: "Balcony", sauna: "Sauna",
+    living_room: "Living room", dining_room: "Dining room", hall: "Hall", corridor: "Corridor", entry: "Entry",
+    office: "Office", storage: "Storage", laundry: "Laundry", utility: "Utility room", closet: "Closet",
+    garage: "Garage", other: "Other room" };
   const hex = n => "#" + n.toString(16).padStart(6, "0");
   $("#legend").innerHTML = [...legend].map(k => k.startsWith("room:")
-    ? `<span><i style="background:${hex(COLORS.room[k.slice(5)])}"></i>${rn[k.slice(5)]}</span>`
+    ? `<span><i style="background:${hex(COLORS.room[k.slice(5)] ?? COLORS.room.other)}"></i>${rn[k.slice(5)] || "Room"}</span>`
     : `<span><i style="background:${hex(COLORS[k])};border:1px solid #999"></i>${names[k]}</span>`).join("")
     + `<span><i style="background:#ff5a1f"></i>Counted in answer</span>`;
   // camera

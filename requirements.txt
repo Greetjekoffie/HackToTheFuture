@@ -7,3 +7,4 @@ ifcopenshell
 torchvision
 pymupdf
 rapidocr
+ultralytics
