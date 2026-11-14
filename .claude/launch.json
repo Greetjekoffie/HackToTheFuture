@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "floorplan-qa", "runtimeExecutable": "python3", "runtimeArgs": ["app.py", "--port", "8000"], "port": 8000 }
+  ]
+}

@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Floor Plan Q&amp;A</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1c1d1f; --muted: #6b6e75; --line: #e3e1dc;
+    --accent: #2f5bd3; --accent-soft: #e8eefc; --err: #b3261e; --mark: #ff5a1f; --radius: 12px;
+    --viewer: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141518; --panel: #1d1f23; --ink: #ececec; --muted: #9a9ea6; --line: #2e3137;
+            --accent: #7c9cff; --accent-soft: #232b44; --err: #ff8a80; --viewer: #22252b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  header { padding: 20px 24px 8px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 16px; padding: 12px 24px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } header { padding: 16px 16px 4px; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  #stage { position: relative; min-height: 560px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #drop { position: absolute; inset: 12px; border: 2px dashed var(--line); border-radius: 10px; display: flex;
+          flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted);
+          cursor: pointer; text-align: center; padding: 16px; transition: border-color .15s, background .15s; }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop strong { color: var(--ink); font-size: 16px; }
+  #drop.hidden { display: none; }
+  #view { position: relative; display: none; max-width: 100%; }
+  #view img { display: block; max-width: 100%; max-height: 74vh; height: auto; }
+  #view canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+  #three { position: absolute; inset: 0; display: none; background: var(--viewer); }
+  #three canvas { display: block; width: 100%; height: 100%; }
+  #threemsg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+              gap: 10px; color: var(--muted); text-align: center; padding: 24px; }
+  #legend { position: absolute; left: 12px; bottom: 12px; display: none; flex-wrap: wrap; gap: 6px 12px; font-size: 12px;
+            background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: 8px;
+            padding: 6px 10px; max-width: calc(100% - 24px); }
+  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #hint3d { position: absolute; right: 12px; bottom: 12px; display: none; font-size: 12px; color: var(--muted); }
+  #planbar { display: none; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px;
+             border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  #planbar b { color: var(--ink); font-weight: 600; }
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+  .seg button { background: transparent; color: var(--muted); padding: 4px 12px; font-weight: 500; border-radius: 6px; }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .side { display: flex; flex-direction: column; gap: 16px; }
+  .side .panel { padding: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  form { display: flex; gap: 8px; }
+  textarea { flex: 1; resize: vertical; min-height: 64px; font: inherit; color: var(--ink); background: var(--bg);
+             border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; background: var(--accent);
+           color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost, a.ghost { background: transparent; color: var(--accent); padding: 4px 8px; font-weight: 500; text-decoration: none; font-size: 13px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip { font-size: 12.5px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 4px 10px;
+          cursor: pointer; border: 0; font-weight: 500; }
+  .answer { display: flex; align-items: baseline; gap: 8px; }
+  .answer .num { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .answer .unit { color: var(--muted); font-size: 16px; }
+  .expl { color: var(--muted); font-size: 13.5px; margin-top: 4px; word-break: break-word; }
+  .tag { display: inline-block; font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--bg);
+         border: 1px solid var(--line); color: var(--muted); margin-top: 8px; }
+  #history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  #history li { padding: 8px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; gap: 10px; font-size: 13.5px; }
+  #history li:hover, #history li.active { background: var(--bg); }
+  #history li .a { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-size: 13.5px; }
+  .spinner { width: 22px; height: 22px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+             animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .err { color: var(--err); }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <h1>Floor Plan Q&amp;A</h1>
+  <span>Upload a PNG, JPG or PDF floor plan, ask questions in English, and see where each answer comes from, on the plan and in a 3D model.</span>
+</header>
+<main>
+  <section class="panel" style="display:flex;flex-direction:column;min-width:0">
+    <div id="planbar">
+      <span><b id="pname"></b> <span id="pmeta"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="seg"><button id="tab2d" class="on" type="button">Plan</button><button id="tab3d" type="button">3D model</button></span>
+        <a class="ghost" id="ifcdl" href="#" download>Download IFC</a>
+        <button class="ghost" id="replace" type="button">Upload another</button>
+      </span>
+    </div>
+    <div id="stage">
+      <label id="drop">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z"/></svg>
+        <strong>Drop a floor plan here</strong>
+        <span>or click to choose a file (PNG, JPG or PDF)</span>
+        <input id="file" type="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" hidden>
+      </label>
+      <div id="view"><img id="img" alt="Uploaded floor plan"><canvas id="ov"></canvas></div>
+      <div id="three"></div>
+      <div id="threemsg"></div>
+      <div id="legend"></div>
+      <div id="hint3d">Drag to orbit · scroll to zoom · right-drag to pan</div>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <h2>Ask</h2>
+      <form id="askf">
+        <textarea id="q" placeholder="How many toilets are drawn on this floor plan?" disabled></textarea>
+        <button id="askb" disabled>Ask</button>
+      </form>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="panel" id="result"><h2>Answer</h2><div class="empty">Upload a plan, then ask a question.</div></div>
+    <div class="panel"><h2>History</h2><ul id="history"><li class="empty" style="cursor:default">No questions yet.</li></ul></div>
+  </aside>
+</main>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const $ = s => document.querySelector(s);
+const EXAMPLES = [
+  ["Doors", "How many doors are shown on this floor plan?"],
+  ["Windows", "How many windows are shown on this floor plan?"],
+  ["Toilets", "How many toilet bowls (WC seats) are drawn on this floor plan?"],
+  ["Sinks", "How many sinks and wash basins (kitchen and bathroom combined) are drawn on this floor plan?"],
+  ["Showers + baths", "How many showers and bathtubs are drawn on this floor plan in total?"],
+  ["Saunas", "How many saunas are on this floor plan?"],
+  ["Bedrooms", "How many bedrooms are on this floor plan?"],
+  ["Bathrooms", "How many bathrooms or washrooms are on this floor plan, not counting separate WC rooms?"],
+  ["Kitchens", "How many kitchens are on this floor plan?"],
+  ["Balconies", "How many balconies are on this floor plan?"],
+  ["Floors", "How many floors (storeys) does this floor plan show?"],
+];
+let plan = null, history = [], current = null, view = "2d";
+
+for (const [label, q] of EXAMPLES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "chip"; b.textContent = label; b.title = q;
+  b.onclick = () => { if (!plan) return; $("#q").value = q; ask(); };
+  $("#chips").appendChild(b);
+}
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", ev => ev.dataTransfer.files[0] && upload(ev.dataTransfer.files[0]));
+$("#file").addEventListener("change", ev => ev.target.files[0] && upload(ev.target.files[0]));
+$("#replace").onclick = () => $("#file").click();
+$("#askf").onsubmit = ev => { ev.preventDefault(); ask(); };
+$("#q").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); ask(); } });
+$("#tab2d").onclick = () => setView("2d");
+$("#tab3d").onclick = () => setView("3d");
+window.addEventListener("resize", () => { draw2d(current); resize3d(); });
+
+function setResult(html) { $("#result").innerHTML = "<h2>Answer</h2>" + html; }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+async function upload(file) {
+  drop.classList.add("hidden");
+  $("#view").style.display = "none";
+  setView("2d");
+  $("#stage").insertAdjacentHTML("beforeend", '<div id="loading" style="display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--muted)"><div class="spinner"></div>Reading the plan…</div>');
+  setResult('<div class="empty">Reading the plan…</div>');
+  try {
+    const r = await fetch("/api/plan", { method: "POST", headers: { "X-Filename": file.name }, body: file });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    plan = j; history = []; renderHistory(); current = null; scene = null; disposeScene();
+    $("#img").src = j.image;
+    $("#img").onload = () => draw2d(null);
+    $("#view").style.display = "block";
+    $("#planbar").style.display = "flex";
+    $("#pname").textContent = j.name;
+    $("#pmeta").textContent = `· ${j.width}×${j.height}px · ${j.n_text} text lines (${j.text_source === "pdf" ? "PDF text" : "OCR"})`;
+    $("#ifcdl").href = `/api/ifc?id=${j.id}`;
+    $("#q").disabled = false; $("#askb").disabled = false; $("#q").focus();
+    setResult('<div class="empty">Ask a question about this plan, or pick one above.</div>');
+  } catch (e) {
+    drop.classList.remove("hidden");
+    setResult(`<div class="err">Upload failed: ${esc(e.message)}</div>`);
+  } finally { $("#loading")?.remove(); }
+}
+
+async function ask() {
+  const q = $("#q").value.trim();
+  if (!plan || !q) return;
+  $("#askb").disabled = true;
+  setResult('<div style="display:flex;gap:10px;align-items:center;color:var(--muted)"><div class="spinner"></div>Working it out…</div>');
+  try {
+    const r = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: plan.id, question: q }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    const item = { q, ...j };
+    history.unshift(item); renderHistory(); show(item);
+  } catch (e) {
+    setResult(`<div class="err">${esc(e.message)}</div>`);
+  } finally { $("#askb").disabled = false; }
+}
+
+const fmt = a => a === null || a === undefined ? "—" : (Number.isInteger(a) ? a : Number(a).toFixed(2));
+const unitLabel = u => u === "m2" ? "m²" : u === "count" ? "" : (u || "");
+
+function show(item) {
+  current = item;
+  const kind = item.intent?.kind || "";
+  const n3d = (item.evidence || []).filter(e => e.id).length;
+  setResult(`<div class="expl" style="margin:0 0 6px;color:var(--ink)">${esc(item.q)}</div>
+    <div class="answer"><span class="num">${fmt(item.answer)}</span><span class="unit">${unitLabel(item.unit)}</span></div>
+    <div class="expl">${esc(item.explanation || "")}</div>
+    <span class="tag">${esc(kind)}${item.evidence?.length ? ` · ${item.evidence.length} marked` : ""}</span>
+    ${n3d ? `<button class="ghost" type="button" id="see3d" style="margin-left:6px">See in 3D →</button>` : ""}`);
+  $("#see3d")?.addEventListener("click", () => setView("3d"));
+  [...$("#history").children].forEach((li, i) => li.classList.toggle("active", history[i] === item));
+  draw2d(item); highlight3d(item);
+}
+
+function renderHistory() {
+  const ul = $("#history"); ul.innerHTML = "";
+  if (!history.length) { ul.innerHTML = '<li class="empty" style="cursor:default">No questions yet.</li>'; return; }
+  history.forEach(h => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${esc(h.q)}</span><span class="a">${fmt(h.answer)} ${unitLabel(h.unit)}</span>`;
+    li.onclick = () => show(h);
+    ul.appendChild(li);
+  });
+}
+
+// ------------------------------------------------------------------ 2D overlay
+function draw2d(item) {
+  const img = $("#img"), cv = $("#ov");
+  if (!plan || !img.naturalWidth) return;
+  const w = img.clientWidth, h = img.clientHeight, dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, w, h);
+  if (!item?.evidence) return;
+  const sx = w / plan.width, sy = h / plan.height;
+  const mark = "#ff5a1f";
+  ctx.lineWidth = 2; ctx.font = "600 11px -apple-system, sans-serif";
+  item.evidence.forEach((e, i) => {
+    if (!e.box) return;
+    const [x0, y0, x1, y1] = e.box;
+    const X = x0 * sx - 3, Y = y0 * sy - 3, W = (x1 - x0) * sx + 6, H = (y1 - y0) * sy + 6;
+    ctx.strokeStyle = mark; ctx.fillStyle = mark + "22";
+    ctx.fillRect(X, Y, W, H); ctx.strokeRect(X, Y, W, H);
+    const tag = String(i + 1), tw = ctx.measureText(tag).width + 8;
+    ctx.fillStyle = mark; ctx.fillRect(X, Y - 15, tw, 15);
+    ctx.fillStyle = "#fff"; ctx.fillText(tag, X + 4, Y - 4);
+  });
+}
+
+// ------------------------------------------------------------------ 3D viewer
+let scene = null, renderer, camera, controls, world, byId = new Map(), tagGroup, raf;
+const COLORS = {
+  wall: 0xd9d6cf, door: 0xa9764a, window: 0x8ec5ff, slab: 0xbfbab0,
+  toilet: 0xffffff, sink: 0xf4f6f8, shower: 0xe9eef2, bathtub: 0xffffff, sauna_stove: 0x4a4d52,
+  room: { kitchen: 0xf6d38a, bedroom: 0xb9d7f2, bathroom: 0x9fe0d5, wc: 0xc7b8f0, balcony: 0xc9e6a6, sauna: 0xe8b48a },
+};
+const HL = 0xff5a1f;
+
+async function setView(v) {
+  view = v;
+  $("#tab2d").classList.toggle("on", v === "2d"); $("#tab3d").classList.toggle("on", v === "3d");
+  $("#view").style.visibility = v === "2d" ? "visible" : "hidden";
+  $("#three").style.display = v === "3d" && scene ? "block" : "none";
+  $("#legend").style.display = v === "3d" && scene ? "flex" : "none";
+  $("#hint3d").style.display = v === "3d" && scene ? "block" : "none";
+  const msg = $("#threemsg");
+  msg.style.display = "none";
+  if (v === "3d" && plan && !scene) {
+    msg.style.display = "flex"; msg.innerHTML = '<div class="spinner"></div>Building the 3D model…';
+    try {
+      const r = await fetch(`/api/scene?id=${plan.id}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      scene = j; build3d(j); msg.style.display = "none";
+      if (view === "3d") setView("3d");
+      highlight3d(current);
+    } catch (e) { msg.innerHTML = `<span class="err">Could not build the 3D model: ${esc(e.message)}</span>`; }
+  }
+  if (v === "3d") resize3d();
+}
+
+function mat(color, opts = {}) { return new THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.0, ...opts }); }
+
+function boxMesh(b, material) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(...b.s), material);
+  m.position.set(...b.c); m.rotation.y = b.yaw || 0; return m;
+}
+
+// Fixtures: a small group in local coordinates (x along wall, z towards the wall), placed like the box
+function fixture(e) {
+  const g = new THREE.Group(), [w, h, d] = e.box.s, white = mat(COLORS[e.kind] ?? 0xffffff);
+  const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); g.add(o); return o; };
+  if (e.kind === "toilet") {
+    add(new THREE.BoxGeometry(w * 0.9, 0.38, d * 0.55), white, 0, 0.19, -d * 0.05);           // pedestal
+    const bowl = add(new THREE.CylinderGeometry(w * 0.5, w * 0.42, 0.12, 24), white, 0, 0.42, -d * 0.12);
+    bowl.scale.z = 1.35;
+    add(new THREE.BoxGeometry(w, 0.42, 0.18), white, 0, 0.6, d / 2 - 0.09);                    // cistern
+  } else if (e.kind === "sink") {
+    add(new THREE.BoxGeometry(w, 0.14, d), white, 0, 0.82, 0);
+    add(new THREE.BoxGeometry(w * 0.7, 0.03, d * 0.6), mat(0xc9d3dc), 0, 0.9, -0.02);
+    add(new THREE.CylinderGeometry(0.07, 0.09, 0.75, 16), white, 0, 0.375, d * 0.15);
+  } else if (e.kind === "shower") {
+    add(new THREE.BoxGeometry(w, 0.06, d), white, 0, 0.03, 0);
+    const glass = mat(0xbfe3ff, { transparent: true, opacity: 0.35 });
+    add(new THREE.BoxGeometry(w, 2.0, 0.02), glass, 0, 1.0, -d / 2);
+    add(new THREE.BoxGeometry(0.02, 2.0, d), glass, -w / 2, 1.0, 0);
+    add(new THREE.CylinderGeometry(0.1, 0.1, 0.02, 16), mat(0x9aa3ab), 0, 1.95, d / 2 - 0.15);
+  } else if (e.kind === "bathtub") {
+    add(new THREE.BoxGeometry(w, h, d), white, 0, h / 2, 0);
+    add(new THREE.BoxGeometry(w * 0.86, 0.04, d * 0.72), mat(0xcfe6f5), 0, h + 0.005, 0);
+  } else {
+    add(new THREE.BoxGeometry(w, h, d), white, 0, h / 2, 0);
+    if (e.kind === "sauna_stove") add(new THREE.BoxGeometry(w * 0.8, 0.12, d * 0.8), mat(0x777b80), 0, h + 0.06, 0);
+  }
+  g.position.set(e.box.c[0], 0, e.box.c[2]); g.rotation.y = e.box.yaw || 0;
+  return g;
+}
+
+function polyMesh(poly, y, material) {
+  const shape = new THREE.Shape(poly.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), material);
+  m.rotation.x = -Math.PI / 2; m.position.y = y; return m;
+}
+
+function textSprite(text, bg = "#ff5a1f", fg = "#fff", scale = 0.5) {
+  const c = document.createElement("canvas"), ctx = c.getContext("2d"), f = 48;
+  ctx.font = `600 ${f}px -apple-system, sans-serif`;
+  const w = Math.ceil(ctx.measureText(text).width) + 28; c.width = w; c.height = f + 24;
+  ctx.font = `600 ${f}px -apple-system, sans-serif`;
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(0, 0, w, c.height, 14); ctx.fill();
+  ctx.fillStyle = fg; ctx.textBaseline = "middle"; ctx.fillText(text, 14, c.height / 2 + 2);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.scale.set(scale * w / c.height, scale, 1); s.renderOrder = 10; return s;
+}
+
+function build3d(sc) {
+  const host = $("#three");
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    host.appendChild(renderer.domElement);
+    camera = new THREE.PerspectiveCamera(45, 1, 0.05, 2000);
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+  }
+  disposeScene();
+  world = new THREE.Scene();
+  world.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(20, 40, 10); world.add(sun);
+  tagGroup = new THREE.Group(); world.add(tagGroup);
+  byId = new Map();
+  const legend = new Set();
+  for (const e of sc.elements) {
+    let obj;
+    if (e.kind === "slab") obj = polyMesh(e.poly, 0, mat(COLORS.slab));
+    else if (e.kind === "room") {
+      obj = polyMesh(e.poly, 0.015, mat(COLORS.room[e.room], { transparent: true, opacity: 0.85 }));
+      const lbl = textSprite(e.name + (e.area ? ` · ${e.area.toFixed(1)} m²` : ""), "rgba(255,255,255,.9)", "#333", 0.35);
+      lbl.position.set(e.label_at[0], 0.4, e.label_at[1]); obj.userData.label = lbl; world.add(lbl);
+      legend.add(`room:${e.room}`);
+    } else if (e.kind === "wall") obj = boxMesh(e.box, mat(COLORS.wall, { transparent: true, opacity: 1 }));
+    else if (e.kind === "door") obj = boxMesh(e.box, mat(COLORS.door));
+    else if (e.kind === "window") obj = boxMesh(e.box, mat(COLORS.window, { transparent: true, opacity: 0.6 }));
+    else { obj = fixture(e); legend.add(e.kind); }
+    obj.userData.el = e;
+    world.add(obj); byId.set(e.id, obj);
+  }
+  // legend
+  const names = { toilet: "Toilet", sink: "Sink", shower: "Shower", bathtub: "Bathtub", sauna_stove: "Sauna stove" };
+  const rn = { kitchen: "Kitchen", bedroom: "Bedroom", bathroom: "Bathroom", wc: "WC", balcony: "Balcony", sauna: "Sauna" };
+  const hex = n => "#" + n.toString(16).padStart(6, "0");
+  $("#legend").innerHTML = [...legend].map(k => k.startsWith("room:")
+    ? `<span><i style="background:${hex(COLORS.room[k.slice(5)])}"></i>${rn[k.slice(5)]}</span>`
+    : `<span><i style="background:${hex(COLORS[k])};border:1px solid #999"></i>${names[k]}</span>`).join("")
+    + `<span><i style="background:#ff5a1f"></i>Counted in answer</span>`;
+  // camera
+  const [W, D] = sc.size, cx = W / 2, cz = D / 2, r = Math.max(W, D);
+  controls.target.set(cx, 0, cz);
+  camera.position.set(cx + r * 0.15, r * 0.85, cz + r * 0.75);
+  camera.far = r * 20; camera.updateProjectionMatrix();
+  cancelAnimationFrame(raf);
+  const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(world, camera); };
+  loop(); resize3d();
+}
+
+function disposeScene() {
+  if (!world) return;
+  world.traverse(o => { o.geometry?.dispose(); (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { m?.map?.dispose(); m?.dispose(); }); });
+  world = null;
+}
+
+function resize3d() {
+  if (!renderer) return;
+  const host = $("#three"), w = host.clientWidth, h = host.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+
+function eachMat(obj, f) { obj.traverse(o => { if (o.material) f(o.material, o); }); }
+
+function highlight3d(item) {
+  if (!world) return;
+  tagGroup.clear();
+  const ids = new Map((item?.evidence || []).map((e, i) => [e.id, i + 1]).filter(([id]) => id));
+  const any = ids.size > 0;
+  for (const [id, obj] of byId) {
+    const e = obj.userData.el;
+    eachMat(obj, m => {
+      if (m.userData.base === undefined) m.userData.base = { color: m.color.getHex(), opacity: m.opacity, transparent: m.transparent };
+      const b = m.userData.base;
+      m.color.setHex(ids.has(id) ? HL : b.color);
+      m.emissive?.setHex(ids.has(id) ? 0x5a1a00 : 0x000000);
+      // ghost the walls while something is highlighted, so fixtures inside rooms stay visible
+      const ghost = any && e.kind === "wall";
+      m.transparent = ghost || b.transparent; m.opacity = ghost ? 0.25 : b.opacity;
+      m.depthWrite = !ghost; m.needsUpdate = true;
+    });
+    if (ids.has(id)) {
+      const t = textSprite(String(ids.get(id)), "#ff5a1f", "#fff", 0.45);
+      const p = e.box ? [e.box.c[0], (e.box.s[1] || 1) + 0.5, e.box.c[2]] : [...(e.label_at ? [e.label_at[0], 1.0, e.label_at[1]] : centroid(e.poly))];
+      t.position.set(...p); tagGroup.add(t);
+    }
+  }
+}
+function centroid(poly) { const n = poly.length; return [poly.reduce((a, p) => a + p[0], 0) / n, 1.0, poly.reduce((a, p) => a + p[1], 0) / n]; }
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+data/
+*.log
+counter_out/*.pt
+plan2ifc_out/cache.pkl
