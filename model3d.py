@@ -169,6 +169,7 @@ def build(plan_rgb, a):
             openings.append(dict(c=(cx, cy), u=(ux, uy), half=half, kind=cls, z0=z0, z1=z1))
             els.append(dict(id=f"{cls}-{i}", kind=cls, ifc="IfcDoor" if cls == "door" else "IfcWindow",
                             name=cls.title(), score=d["score"], detector=d.get("detector", a.get("object_detector")),
+                            source_box=list(d["box"]) if d.get("box") else None,
                             box=_seg_box(to_m(*pa), to_m(*pb), thick, z0, z1)))
 
     # Split the wall around opening footprints while retaining the wall above
@@ -235,6 +236,7 @@ def build(plan_rgb, a):
             ifc_cls, ptype = IFC_OF[cls]
             els.append(dict(id=f"{cls}-{i}", kind=cls, ifc=ifc_cls, ptype=ptype, name=cls.replace("_", " ").title(),
                             score=d["score"], detector=d.get("detector", a.get("object_detector")),
+                            source_box=list(d["box"]) if d.get("box") else None,
                             box=dict(c=[X, fh / 2, Z], s=[fw, fh, fd], yaw=yaw)))
 
     # ---- rooms -------------------------------------------------------------------------------------

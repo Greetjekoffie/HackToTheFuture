@@ -1,8 +1,8 @@
 """Local web app: upload a floor plan (PNG / JPG / PDF), ask English questions about it, and see the answer
 highlighted on the plan and in a 3D model built from it (downloadable as IFC).
 
-    python3 app.py            # then open http://localhost:8000
-    .venv-yolo/bin/python app.py  # when using the locally trained YOLO detector
+    .venv-yolo312/bin/python app.py  # loads counter_out/yolo_objects/weights/best.pt
+    # then open http://localhost:8000
 
 All analysis runs on this machine (OCR, the trained plan reader, question rules, IFC export). Standard
 library HTTP server only. The page loads the three.js viewer library from a CDN.
@@ -25,6 +25,8 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image
 
 import qa
@@ -34,6 +36,7 @@ MAX_UPLOAD = 60 * 1024 * 1024
 PREVIEW_LONG_SIDE = 1800
 PLANS = OrderedDict()  # id -> FloorPlan (small LRU)
 LOCK = threading.Lock()  # OCR / torch models are not thread safe
+_RAW_PLAN_INDEX = None
 
 
 def preview_data_url(rgb):
@@ -44,6 +47,71 @@ def preview_data_url(rgb):
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _mask_data_url(mask, color, alpha=105):
+    rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
+    rgba[mask] = (*color, alpha)
+    buf = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buf, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def comparison_data(fp):
+    """Build model overlays and ground truth when this is an exact dataset plan."""
+    global _RAW_PLAN_INDEX
+    import counter
+
+    height, width = fp.rgb.shape[:2]
+    analysis = fp.analysis()
+    pred_wall = cv2.resize(analysis["wall"], (width, height), interpolation=cv2.INTER_LINEAR) >= 0.5
+    predicted = {
+        name: [dict(box=list(map(float, d["box"])), score=float(d.get("score", 0)))
+               for d in detections if d.get("box")]
+        for name, detections in analysis["objects"].items()
+    }
+    reference_wall = np.zeros((height, width), dtype=np.uint8)
+    reference = {}
+    reference_rooms = {}
+    reference_available = False
+    status = "No matching labeled source plan was found; reference labels aren't available for this upload."
+
+    if counter.RAW.is_dir():
+        if _RAW_PLAN_INDEX is None:
+            _RAW_PLAN_INDEX = {
+                f"{p.parent.parent.name}_{p.parent.name}": p
+                for p in counter.RAW.rglob("model.svg")
+            }
+        source = _RAW_PLAN_INDEX.get(Path(fp.name).stem)
+        if source is not None:
+            bgr = cv2.imread(str(source.parent / "F1_scaled.png"), cv2.IMREAD_COLOR)
+            if bgr is not None:
+                truth_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                if truth_rgb.shape == fp.rgb.shape and np.mean(np.abs(truth_rgb.astype(np.int16) - fp.rgb.astype(np.int16))) <= 4:
+                    ann = counter.parse_svg(source)
+                    for polygon in ann["walls"]:
+                        cv2.fillPoly(reference_wall, [np.round(polygon).astype(np.int32)], 1)
+                    for polygon in ann["doors"]:
+                        cv2.fillPoly(reference_wall, [np.round(polygon).astype(np.int32)], 0)
+                    reference = {
+                        name: [list(map(float, box)) for box in boxes]
+                        for name, boxes in ann["objects"].items()
+                    }
+                    reference_rooms = {
+                        name: [[[float(x), float(y)] for x, y in polygon]
+                               for polygon in polygons]
+                        for name, polygons in ann["rooms"].items()
+                    }
+                    reference_available = True
+                    status = "Reference labels matched from CubiCasa5K."
+
+    return dict(
+        reference_available=reference_available, status=status,
+        predicted_wall=_mask_data_url(pred_wall, (255, 89, 44)),
+        reference_wall=_mask_data_url(reference_wall.astype(bool), (0, 190, 150)),
+        predicted_objects=predicted, reference_objects=reference,
+        predicted_rooms=analysis["rooms"], reference_rooms=reference_rooms,
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,6 +129,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         query = dict(p.split("=", 1) for p in self.path.split("?", 1)[1].split("&") if "=" in p) if "?" in self.path else {}
+        if path == "/api/compare":
+            fp = PLANS.get(query.get("id", ""))
+            if fp is None:
+                return self._json(404, dict(error="Plan not found. Upload it again."))
+            try:
+                with LOCK:
+                    result = comparison_data(fp)
+                return self._json(200, result)
+            except Exception as ex:
+                traceback.print_exc()
+                return self._json(500, dict(error=f"{type(ex).__name__}: {ex}"))
         if path in ("/api/scene", "/api/ifc"):
             fp = PLANS.get(query.get("id", ""))
             if fp is None:
@@ -151,6 +230,17 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
+    import yolo_objects
+    try:
+        if yolo_objects.load_models():
+            print(f"Web detector: {yolo_objects.detector_name()} ({yolo_objects.WEIGHTS})")
+            if yolo_objects.TOILET_WEIGHTS.is_file():
+                print(f"Toilet specialist: {yolo_objects.TOILET_WEIGHTS}")
+        else:
+            print("Web detector: YOLO best.pt not found; using the heat-map fallback.")
+    except Exception as ex:
+        raise SystemExit(f"Could not load YOLO weights for the website: {type(ex).__name__}: {ex}\n"
+                         "Run the app with its YOLO-enabled virtualenv.") from ex
     try:
         srv = ThreadingHTTPServer((a.host, a.port), Handler)
     except OSError as ex:

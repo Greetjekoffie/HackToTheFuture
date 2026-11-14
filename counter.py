@@ -510,6 +510,32 @@ def load_trained():
     return _MODEL
 
 
+def _plan_roi_from_walls(wall, source_shape):
+    """Estimate the drawing's building bounds from its wall map, excluding sheet legends."""
+    h, w = wall.shape
+    k = max(7, int(round(min(h, w) * 0.032)))
+    k += 1 - (k % 2)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    mask = (wall >= 0.35).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.dilate(mask, kernel)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if n <= 1:
+        return None
+    idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    x, y, bw, bh, area = map(int, stats[idx])
+    if area < 0.012 * h * w or bw < 0.18 * w or bh < 0.18 * h or bw * bh > 0.78 * h * w:
+        return None
+    # Expand the wall-derived core so balcony edges and fixtures just inside
+    # the exterior wall remain in scope, while sheet legends stay outside.
+    px, py = int(bw * 0.06), int(bh * 0.06)
+    x0, y0 = max(0, x - px), max(0, y - py)
+    x1, y1 = min(w, x + bw + px), min(h, y + bh + py)
+    source_h, source_w = source_shape[:2]
+    return (x0 * source_w / w, y0 * source_h / h,
+            x1 * source_w / w, y1 * source_h / h)
+
+
 def analyse(rgb):
     """Public API: rgb image -> dict(
          objects={cls: [dict(box, center, score)]}  (input px),
@@ -518,11 +544,25 @@ def analyse(rgb):
     m, thr, size, dev = load_trained()
     ink, s = resize_long(to_gray_ink(rgb))
     p = forward_full(m, ink, dev)
+    wall = p[-1].detach().cpu().numpy()
+    plan_roi = _plan_roi_from_walls(wall, rgb.shape)
+    if plan_roi is not None:
+        x0, y0, x1, y1 = plan_roi
+        map_h, map_w = wall.shape
+        image_h, image_w = rgb.shape[:2]
+        mx0, my0 = int(x0 * map_w / image_w), int(y0 * map_h / image_h)
+        mx1, my1 = int(np.ceil(x1 * map_w / image_w)), int(np.ceil(y1 * map_h / image_h))
+        in_plan = np.zeros_like(wall, dtype=bool)
+        in_plan[max(0, my0):min(map_h, my1), max(0, mx0):min(map_w, mx1)] = True
+        wall[~in_plan] = 0.0
     pk = peak_values(p)
     objects, rooms = {}, {}
     for c in CLASSES:
         v, xs, ys = pk[c]
         keep = v >= thr[c]
+        if plan_roi is not None:
+            x0, y0, x1, y1 = plan_roi
+            keep &= (xs / s >= x0) & (xs / s <= x1) & (ys / s >= y0) & (ys / s <= y1)
         dets = []
         half_default = size.get(c, 20) / 2
         heat = p[CLASSES.index(c)].detach().cpu().numpy() if c in OBJECTS else None
@@ -559,11 +599,11 @@ def analyse(rgb):
     # remains responsible for room labels and walls, and is the fallback until
     # the YOLO weights have been trained.
     import yolo_objects
-    yolo = yolo_objects.detect(rgb)
+    yolo = yolo_objects.detect(rgb, roi=plan_roi)
     object_detector = yolo_objects.detector_name() if yolo is not None else "heat-map detector"
     if yolo is not None:
         objects = yolo
-    return dict(objects=objects, rooms=rooms, wall=p[-1].cpu().numpy(), scale=s,
+    return dict(objects=objects, rooms=rooms, wall=wall, scale=s,
                 object_detector=object_detector)
 
 

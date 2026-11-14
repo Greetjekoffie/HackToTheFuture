@@ -35,6 +35,12 @@
   #view canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
   #three { position: absolute; inset: 0; display: none; background: var(--viewer); }
   #three canvas { display: block; width: 100%; height: 100%; }
+  #compareinfo { position: absolute; z-index: 3; top: 12px; left: 12px; display: none; max-width: min(420px, calc(100% - 24px));
+                 padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px;
+                 background: color-mix(in srgb, var(--panel) 94%, transparent); font-size: 12px; }
+  #compareinfo strong { display: block; margin-bottom: 2px; }
+  #compareinfo span { color: var(--muted); }
+  #compareinfo .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px 0 8px; }
   #threemsg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
               gap: 10px; color: var(--muted); text-align: center; padding: 24px; }
   #legend { position: absolute; left: 12px; bottom: 12px; display: none; flex-wrap: wrap; gap: 6px 12px; font-size: 12px;
@@ -104,7 +110,7 @@
     <div id="planbar">
       <span><b id="pname"></b> <span id="pmeta"></span></span>
       <span style="display:flex;gap:8px;align-items:center">
-        <span class="seg"><button id="tab2d" class="on" type="button">Plan</button><button id="tab3d" type="button">3D model</button></span>
+        <span class="seg"><button id="tab2d" class="on" type="button">Plan</button><button id="tabcompare" type="button">Compare</button><button id="tab3d" type="button">3D model</button></span>
         <a class="ghost" id="ifcdl" href="#" download>Download IFC</a>
         <button class="ghost" id="replace" type="button">Upload another</button>
       </span>
@@ -117,6 +123,7 @@
         <input id="file" type="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" hidden>
       </label>
       <div id="view"><img id="img" alt="Uploaded floor plan"><canvas id="ov"></canvas></div>
+      <div id="compareinfo"><strong>Reference labels vs model prediction</strong><span id="comparestatus">Preparing overlays…</span><br><span class="swatch" style="background:#00be96"></span><span>Reference</span><span class="swatch" style="background:#ff592c"></span><span>Prediction</span></div>
       <div id="three"></div>
       <div id="threemsg"></div>
       <div id="explain3d"></div>
@@ -157,7 +164,7 @@ const EXAMPLES = [
   ["Balconies", "How many balconies are on this floor plan?"],
   ["Floors", "How many floors (storeys) does this floor plan show?"],
 ];
-let plan = null, history = [], current = null, view = "2d";
+let plan = null, history = [], current = null, view = "2d", comparison = null, comparisonLoading = false;
 
 for (const [label, q] of EXAMPLES) {
   const b = document.createElement("button");
@@ -175,6 +182,7 @@ $("#replace").onclick = () => $("#file").click();
 $("#askf").onsubmit = ev => { ev.preventDefault(); ask(); };
 $("#q").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); ask(); } });
 $("#tab2d").onclick = () => setView("2d");
+$("#tabcompare").onclick = () => setView("compare");
 $("#tab3d").onclick = () => setView("3d");
 window.addEventListener("resize", () => { draw2d(current); resize3d(); });
 
@@ -191,7 +199,7 @@ async function upload(file) {
     const r = await fetch("/api/plan", { method: "POST", headers: { "X-Filename": file.name }, body: file });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
-    plan = j; history = []; renderHistory(); current = null; scene = null; disposeScene();
+    plan = j; history = []; renderHistory(); current = null; scene = null; comparison = null; comparisonLoading = false; disposeScene();
     $("#img").src = j.image;
     $("#img").onload = () => draw2d(null);
     $("#view").style.display = "block";
@@ -253,6 +261,7 @@ function renderHistory() {
 
 // ------------------------------------------------------------------ 2D overlay
 function draw2d(item) {
+  if (view === "compare") { drawComparison(); return; }
   const img = $("#img"), cv = $("#ov");
   if (!plan || !img.naturalWidth) return;
   const w = img.clientWidth, h = img.clientHeight, dpr = window.devicePixelRatio || 1;
@@ -274,11 +283,63 @@ function draw2d(item) {
   });
 }
 
+function drawComparison() {
+  const img = $("#img"), cv = $("#ov");
+  if (!plan || !img.naturalWidth) return;
+  const w = img.clientWidth, h = img.clientHeight, dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  if (!comparison) return;
+
+  const sx = w / plan.width, sy = h / plan.height;
+  ctx.drawImage(comparison.referenceWallImage, 0, 0, w, h);
+  ctx.drawImage(comparison.predictedWallImage, 0, 0, w, h);
+  ctx.font = "600 10px -apple-system, sans-serif";
+  const drawBox = (box, label, color, dashed) => {
+    const [x0, y0, x1, y1] = box;
+    const x = x0 * sx, y = y0 * sy, bw = (x1 - x0) * sx, bh = (y1 - y0) * sy;
+    ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dashed ? [5, 3] : []);
+    ctx.strokeRect(x, y, bw, bh); ctx.setLineDash([]);
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillStyle = color; ctx.fillRect(x, Math.max(0, y - 14), tw, 14);
+    ctx.fillStyle = "#fff"; ctx.fillText(label, x + 4, Math.max(10, y - 4)); ctx.restore();
+  };
+  const classes = new Set([
+    ...Object.keys(comparison.reference_objects || {}),
+    ...Object.keys(comparison.predicted_objects || {}),
+  ]);
+  for (const name of classes) {
+    for (const box of comparison.reference_objects?.[name] || [])
+      drawBox(box, `Ref · ${name.replaceAll("_", " ")}`, "#00a77f", true);
+    for (const detection of comparison.predicted_objects?.[name] || [])
+      drawBox(detection.box, `Pred · ${name.replaceAll("_", " ")}`, "#f04421", false);
+  }
+  for (const polygons of Object.values(comparison.reference_rooms || {})) {
+    for (const polygon of polygons) {
+      if (!polygon.length) continue;
+      ctx.save(); ctx.strokeStyle = "#00a77f"; ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(polygon[0][0] * sx, polygon[0][1] * sy);
+      polygon.slice(1).forEach(([x, y]) => ctx.lineTo(x * sx, y * sy)); ctx.closePath(); ctx.stroke(); ctx.restore();
+    }
+  }
+  for (const [name, detections] of Object.entries(comparison.predicted_rooms || {})) {
+    for (const detection of detections) {
+      const [x, y] = detection.center;
+      ctx.beginPath(); ctx.arc(x * sx, y * sy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#f04421"; ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.font = "600 10px -apple-system, sans-serif";
+      const label = `Pred · ${name.replaceAll("_", " ")}`, tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = "#f04421"; ctx.fillRect(x * sx + 6, y * sy - 7, tw, 14);
+      ctx.fillStyle = "#fff"; ctx.fillText(label, x * sx + 10, y * sy + 3);
+    }
+  }
+}
+
 // ------------------------------------------------------------------ 3D viewer
 let scene = null, renderer, camera, controls, world, byId = new Map(), tagGroup, raf;
 const COLORS = {
   wall: 0xd9d6cf, door: 0xa9764a, window: 0x8ec5ff, slab: 0xbfbab0,
-  toilet: 0xffffff, sink: 0xf4f6f8, shower: 0xe9eef2, bathtub: 0xffffff, sauna_stove: 0x4a4d52,
+  toilet: 0xe85d4a, sink: 0xf4f6f8, shower: 0xe9eef2, bathtub: 0xffffff, sauna_stove: 0x4a4d52,
   room: { kitchen: 0xf6d38a, bedroom: 0xb9d7f2, bathroom: 0x9fe0d5, wc: 0xc7b8f0, balcony: 0xc9e6a6,
           sauna: 0xe8b48a, living_room: 0xf1c8a5, dining_room: 0xf4d5a1, hall: 0xd7c3a8, corridor: 0xc9c6db,
           entry: 0xc9c6db, office: 0xb8d6c1, storage: 0xd4c9bb, laundry: 0xaedbd7, utility: 0xbfc7cd,
@@ -288,14 +349,40 @@ const HL = 0xff5a1f;
 
 async function setView(v) {
   view = v;
-  $("#tab2d").classList.toggle("on", v === "2d"); $("#tab3d").classList.toggle("on", v === "3d");
-  $("#view").style.visibility = v === "2d" ? "visible" : "hidden";
+  $("#tab2d").classList.toggle("on", v === "2d");
+  $("#tabcompare").classList.toggle("on", v === "compare");
+  $("#tab3d").classList.toggle("on", v === "3d");
+  $("#view").style.visibility = v === "3d" ? "hidden" : "visible";
+  $("#compareinfo").style.display = v === "compare" ? "block" : "none";
   $("#three").style.display = v === "3d" && scene ? "block" : "none";
   $("#legend").style.display = v === "3d" && scene ? "flex" : "none";
   $("#explain3d").style.display = v === "3d" && scene ? "block" : "none";
   $("#hint3d").style.display = v === "3d" && scene ? "block" : "none";
   const msg = $("#threemsg");
   msg.style.display = "none";
+  if (v === "compare" && plan && !comparison && !comparisonLoading) {
+    const requestedId = plan.id;
+    comparisonLoading = true;
+    $("#comparestatus").textContent = "Preparing overlays…";
+    try {
+      const r = await fetch(`/api/compare?id=${encodeURIComponent(requestedId)}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      const [predictedWallImage, referenceWallImage] = await Promise.all([
+        loadImage(j.predicted_wall), loadImage(j.reference_wall),
+      ]);
+      if (plan?.id === requestedId) {
+        comparison = { ...j, predictedWallImage, referenceWallImage };
+        $("#comparestatus").textContent = j.status;
+        drawComparison();
+      }
+    } catch (e) {
+      if (plan?.id === requestedId) $("#comparestatus").textContent = `Could not prepare overlays: ${e.message}`;
+    } finally { comparisonLoading = false; }
+  } else if (v === "compare" && comparison) {
+    $("#comparestatus").textContent = comparison.status;
+    drawComparison();
+  }
   if (v === "3d" && plan && !scene) {
     msg.style.display = "flex"; msg.innerHTML = '<div class="spinner"></div>Building the 3D model…';
     try {
@@ -310,6 +397,15 @@ async function setView(v) {
   if (v === "3d") resize3d();
 }
 
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("An overlay image could not be decoded."));
+    image.src = src;
+  });
+}
+
 function mat(color, opts = {}) { return new THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.0, ...opts }); }
 
 function boxMesh(b, material) {
@@ -319,8 +415,13 @@ function boxMesh(b, material) {
 
 // Fixtures: a small group in local coordinates (x along wall, z towards the wall), placed like the box
 function fixture(e) {
-  const g = new THREE.Group(), [w, h, d] = e.box.s, white = mat(COLORS[e.kind] ?? 0xffffff);
+  const g = new THREE.Group(), [w, h, d] = e.box.s;
+  const white = mat(e.kind === "toilet" ? 0xffffff : (COLORS[e.kind] ?? 0xffffff));
   const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); g.add(o); return o; };
+  if (e.kind === "toilet") {
+    const locator = add(new THREE.RingGeometry(0.22, 0.30, 28), mat(COLORS.toilet), 0, 0.035, 0);
+    locator.rotation.x = -Math.PI / 2; // floor halo marks the detected toilet location
+  }
   if (e.kind === "toilet") {
     add(new THREE.BoxGeometry(w * 0.9, 0.38, d * 0.55), white, 0, 0.19, -d * 0.05);           // pedestal
     const bowl = add(new THREE.CylinderGeometry(w * 0.5, w * 0.42, 0.12, 24), white, 0, 0.42, -d * 0.12);
@@ -400,11 +501,14 @@ function build3d(sc) {
   const detectorName = sc.object_detector || "object detector";
   $("#explain3d").innerHTML = `<b>Object detection · ${esc(detectorName)}</b>
     <p>${detectorName.includes("YOLO")
-      ? `${esc(detectorName)} detects symbol boxes in the drawing. Confidence is the model’s certainty, not a guarantee. Click a row to locate the detection. Room outlines come from enclosed walls and nearby plan text supplies their names; the 3D fixture shapes are schematic proxies.`
+      ? `${esc(detectorName)} scans overlapping drawing tiles and keeps each object from its closest tile. Confidence is the model’s certainty, not a guarantee. Click a row to mark it on the plan and zoom to it in 3D; answers also highlight matching items in both views. Room outlines come from enclosed walls and nearby plan text supplies their names; fixture shapes are schematic proxies.`
       : "YOLO weights are not trained yet, so this view is using the current heat-map detector. Click a row to locate it. Room outlines come from enclosed walls and nearby plan text supplies their names; the 3D fixture shapes are schematic proxies."}</p>
     ${detected.length ? detected.map((e, i) => `<button class="det" type="button" data-id="${esc(e.id)}">${i + 1}. ${esc(e.name)} · ${Math.round((e.score || 0) * 100)}% confidence</button>`).join("") : '<span class="empty">No object detections in this plan.</span>'}`;
-  $("#explain3d").querySelectorAll("button[data-id]").forEach(b => b.addEventListener("click", () =>
-    highlight3d({ evidence: [{ id: b.dataset.id }] })));
+  $("#explain3d").querySelectorAll("button[data-id]").forEach(b => b.addEventListener("click", () => {
+    const e = byId.get(b.dataset.id)?.userData.el;
+    draw2d({ evidence: [{ box: e?.source_box }] });
+    highlight3d({ evidence: [{ id: b.dataset.id }] }, true);
+  }));
   // legend
   const names = { toilet: "Toilet", sink: "Sink", shower: "Shower", bathtub: "Bathtub", sauna_stove: "Sauna stove" };
   const rn = { kitchen: "Kitchen", bedroom: "Bedroom", bathroom: "Bathroom", wc: "WC", balcony: "Balcony", sauna: "Sauna",
@@ -441,7 +545,7 @@ function resize3d() {
 
 function eachMat(obj, f) { obj.traverse(o => { if (o.material) f(o.material, o); }); }
 
-function highlight3d(item) {
+function highlight3d(item, focus = false) {
   if (!world) return;
   tagGroup.clear();
   const ids = new Map((item?.evidence || []).map((e, i) => [e.id, i + 1]).filter(([id]) => id));
@@ -462,6 +566,15 @@ function highlight3d(item) {
       const t = textSprite(String(ids.get(id)), "#ff5a1f", "#fff", 0.45);
       const p = e.box ? [e.box.c[0], (e.box.s[1] || 1) + 0.5, e.box.c[2]] : [...(e.label_at ? [e.label_at[0], 1.0, e.label_at[1]] : centroid(e.poly))];
       t.position.set(...p); tagGroup.add(t);
+    }
+  }
+  if (focus && ids.size) {
+    const obj = byId.get(ids.keys().next().value);
+    if (obj) {
+      const target = obj.position.clone();
+      controls.target.copy(target);
+      camera.position.copy(target).add(new THREE.Vector3(3.5, 3.0, 4.5));
+      controls.update();
     }
   }
 }
